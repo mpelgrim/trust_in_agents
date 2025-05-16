@@ -1,0 +1,406 @@
+---
+title: "Agent Trust Analysis (Trust Exp. 2)"
+author: "Madeline H. Pelgrim"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+---
+
+```{r echo=FALSE, message=FALSE, warning = FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(lmerTest)
+library(rstatix)
+library(emmeans)
+library(plotrix)
+library(cowplot)
+```
+
+# Import and Prepare Cleaned Data
+
+*Data from qualtrics cleaned using dog_trust_cleaning.R file as in Experiment 1*
+
+```{r}
+
+analysis_df <- read_csv("trust_exp2_data.csv", show_col_types = FALSE)
+
+##Create dataframe with summed scores (not broken down by MDMT V2 Subscore)
+summed_df <- analysis_df %>%
+  ungroup() %>%
+  mutate(final_score = push_reliable_score + push_ethical_score + push_competent_score + push_benevolent_score + push_transparent_score, 
+    baseline_score = reliable_score + ethical_score + competent_score + benevolent_score, transparent_score) %>%
+  mutate(magnitude_change_score = abs(baseline_score - final_score), 
+         change_score = final_score - baseline_score,
+         social_scenario = ifelse(scenario_num == 3, 1,
+                                  ifelse(scenario_num == 4, 2, scenario_num))) %>%
+  mutate(social_scenario = replace(social_scenario, social_scenario == 5, 1)) %>%
+  select(scenario, final_score, baseline_score, Agent, ParticipantID, scenario_num, Push_Direction, magnitude_change_score, change_score, social_scenario, scenario_order) %>%
+  distinct()
+
+```
+
+#### Effects of social vs. less-social scenarios (collapsing across our 5)
+
+```{r}
+##Prepare dataframe
+social_df <- summed_df %>%
+  ungroup() %>%
+  group_by(ParticipantID, social_scenario) %>%
+  summarise(final_score = mean(final_score), baseline_score = mean(baseline_score),
+            magnitude_change_score = mean(magnitude_change_score)) %>%
+  group_by(ParticipantID) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+##Gather summary statistics
+social_df %>%
+group_by(social_scenario) %>%
+summarise(
+mean_b = mean(baseline_score, na.rm = TRUE),
+sd_b = sd(baseline_score, na.rm = TRUE),
+mean_c = mean(magnitude_change_score, na.rm= TRUE),
+sd_c = sd(magnitude_change_score, na.rm = TRUE)
+)
+        
+
+##Are the baseline scores different between social and less social scenarios? 
+t.test(baseline_score ~ social_scenario, data = social_df, paired = TRUE)
+
+
+##Are the magnitude change scores different between social and less social scenarios? 
+t.test(magnitude_change_score ~ social_scenario, data = social_df, paired = TRUE)
+
+```
+
+# Baseline Trust by Agent ANOVA
+
+```{r}
+##Baseline Scores
+
+anova_df <- summed_df %>%
+  group_by(ParticipantID) %>%
+  summarise(Agent = Agent, baseline_score = mean(baseline_score)) %>%
+  distinct()
+
+anova_df %>%
+  group_by(Agent) %>%
+summarise(
+  mean = mean(baseline_score, na.rm = TRUE),
+  sd = sd(baseline_score, na.rm = TRUE))
+
+agent_anova <- aov(baseline_score ~ Agent, data = anova_df)
+
+
+summary(agent_anova)
+
+TukeyHSD(agent_anova)
+```
+
+# Change by Agent and Direction
+
+```{r}
+
+##model without interaction
+model0 <- lmer(magnitude_change_score ~ Push_Direction + Agent + (1|ParticipantID), contrasts = list(Push_Direction = "contr.sum", Agent = "contr.sum"), data = summed_df)
+
+
+##model with interaction
+model1 <- lmer(magnitude_change_score ~ Push_Direction*Agent + (1|ParticipantID), contrasts = list(Push_Direction = "contr.sum", Agent = "contr.sum"), data = summed_df)
+
+
+anova(model0, model1) ##interaction does improve fit so proceed with interaction model
+
+##summary of main effects
+Anova(model0, type = 3)
+
+summary(model0)
+#follow-up on differences
+pairs(emmeans(model0, ~ Agent))
+```
+
+### How many of the change scores match the valence of the push direction?
+
+```{r}
+summed_df %>%
+  group_by(Push_Direction) %>%
+summarise(
+  mean = mean(change_score, na.rm = TRUE),
+  sd = sd(change_score, na.rm = TRUE))
+
+analysis_df %>%
+  group_by(scenario_num, ParticipantID) %>%
+  summarise(value = sum(value), Push_Direction = Push_Direction) %>%
+  filter(!is.na(value)) %>%
+  distinct() %>%
+  mutate(sign = if_else(value > 0, "positive", "negative")) %>%
+  group_by(Push_Direction, sign) %>%
+  summarise(count = n(), .groups = "drop")
+```
+
+# Change by Agent and MDMT Subdimension
+
+```{r}
+model0.1 <- lmer(change_magnitude ~ Agent + measured_dimension + (1|ParticipantID), contrasts = list(Agent = "contr.sum", measured_dimension = "contr.sum"), data = analysis_df)
+
+model1.1 <- lmer(change_magnitude ~ Agent*measured_dimension + (1|ParticipantID), contrasts = list(Agent = "contr.sum", measured_dimension = "contr.sum"), data = analysis_df)
+
+anova(model0.1, model1.1) ###Interaction does improve model fit so proceed with
+
+summary(model1.1)
+
+Anova(model1.1, type = 3)
+
+#follow-up on differences
+pairs(emmeans(model1.1, ~ Agent | measured_dimension))
+
+```
+
+### Descriptives for the subdimension model
+
+```{r}
+
+analysis_df %>%
+  group_by(Agent) %>%
+summarise(
+  mean = mean(change_magnitude, na.rm = TRUE),
+  sd = sd(change_magnitude, na.rm = TRUE))
+
+
+analysis_df %>%
+  group_by(Push_Direction) %>%
+summarise(
+  mean = mean(change_magnitude, na.rm = TRUE),
+  sd = sd(change_magnitude, na.rm = TRUE))
+```
+
+# Visualize differences by agent
+
+### Baseline Trust
+
+```{r}
+agent_colors <- c(
+  dog = "#A6CEE3",
+  robot = "#1F78B4",
+  person = "#B2DF8A"
+)
+
+
+analysis_df %>%
+  select(ParticipantID, reliable_score:benevolent_score, Agent) %>%
+  pivot_longer(!c(ParticipantID, Agent), 
+               names_to = "measured_dimension", 
+               values_to = "baseline_score") %>% 
+  mutate(measured_dimension = str_remove(as.character(measured_dimension), "_score")) %>%
+ group_by(measured_dimension, Agent) %>%
+  summarise(mean = mean(baseline_score), 
+            se = std.error(baseline_score)) %>%
+  ungroup() %>%
+  mutate(Agent = factor(Agent, levels = c("robot", "dog", "person")))  %>%
+  ggplot(aes(x = measured_dimension, y = mean, fill = Agent)) + 
+  geom_bar(stat = 'identity', position = "dodge") +
+  theme(panel.background = element_blank(),
+        axis.line = element_line(color = "black"),
+         panel.grid.major = element_line(color = "grey85"),
+        axis.title.x = element_text(face = "bold", size = 12),
+        axis.title.y = element_text(face = "bold", size = 12)) + 
+  scale_fill_manual(breaks=c("robot","dog","person"), values = agent_colors) +
+  geom_errorbar(aes(ymin=mean - se, ymax=mean+se), width=.2,
+                 position=position_dodge(.9)) + ylim(0,7) + xlab("Measured Dimension") + 
+  ylab("Mean Baseline Score with Standard Error")
+
+```
+
+### Change in Trust
+
+```{r}
+#library("RColorBrewer")
+
+#brewer.pal(3, "Paired")
+
+agent_colors <- c(
+  dog = "#A6CEE3",
+  robot = "#1F78B4",
+  person = "#B2DF8A"
+)
+
+
+up_graph <- analysis_df %>%
+  filter(Push_Direction == "UP") %>%
+  group_by(measured_dimension, Agent, Push_Direction) %>%
+  summarise(mean = mean(value), 
+            se = std.error(value)) %>%
+  ungroup() %>%
+  mutate(measured_dimension = as.character(measured_dimension)) %>%
+  mutate(measured_dimension = replace(measured_dimension, measured_dimension == "B", "Benevolent"), 
+         measured_dimension = replace(measured_dimension, measured_dimension == "E", "Ethical"),
+         measured_dimension = replace(measured_dimension, measured_dimension == "R", "Reliable"),
+         measured_dimension = replace(measured_dimension, measured_dimension == "C", "Competent"),
+         measured_dimension = replace(measured_dimension, measured_dimension == "T", "Transparent")) %>%
+  mutate(Agent = factor(Agent, levels = c("robot", "dog", "person")))  %>%
+  ggplot(aes(x = measured_dimension, y = mean, fill = Agent)) + 
+  geom_bar(stat = 'identity', position = "dodge") + ylim(0, 2.5) +
+  theme(legend.position = "none", 
+        axis.title.y = element_blank(), 
+        axis.title.x = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(color = "black"),
+         panel.grid.major = element_line(color = "grey85")) + 
+  scale_fill_manual(values = agent_colors) + 
+  geom_errorbar(aes(ymin=mean - se, ymax=mean+se), width=.2,
+                 position=position_dodge(.9))
+  #scale_fill_brewer(palette = "Paired") 
+ 
+down_graph <- analysis_df %>%
+  filter(Push_Direction == "DOWN") %>%
+  group_by(measured_dimension, Agent, Push_Direction) %>%
+  mutate(Agent = factor(Agent, levels = c("robot", "dog", "person"))) %>%
+  summarise(mean = mean(value),
+            se = std.error(value)) %>%
+  ggplot(aes(x = measured_dimension, y = mean, fill = Agent)) + 
+  geom_bar(stat = 'identity', position = "dodge") + ylim(-2.5, 0) + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey85")) + 
+  scale_x_discrete(position = "top") + 
+  scale_fill_manual(breaks=c("robot","dog","person"), values = agent_colors) + 
+  geom_errorbar(aes(ymin=mean - se, ymax=mean+se), width=.2,
+                 position=position_dodge(.9))
+  #scale_fill_brewer(palette = "Paired")
+
+
+legend <- get_legend(down_graph)
+  
+down_graph_a <- down_graph + theme(legend.position = "none")
+
+
+# Stack the graphs vertically
+combined_graphs <- plot_grid(
+  up_graph,
+  down_graph_a,
+  ncol = 1,
+  align = "v"
+)
+
+# Add the legend to the right
+stack_with_legend <- plot_grid(
+  combined_graphs,
+  legend,
+  ncol = 2,
+  rel_widths = c(3, 1),
+  align = "h"
+)
+
+
+final_plot <- ggdraw() +
+  draw_label("Average Change Score with Standard Error", x = 0.02, y = 0.5, angle = 90,
+             hjust = 0.5, fontface = "bold", size = 12) +
+  draw_label("Measured Dimension", x = 0.4, y = 0.03, angle = 0,
+             hjust = 0.5, fontface = "bold", size = 12) +
+  draw_plot(stack_with_legend, x = 0.05, y = 0.05, width = 0.9, height = 0.9)
+
+# Print the final plot
+print(final_plot)
+
+
+```
+
+# Participant Factors
+
+### Presentation Order
+
+```{r}
+##Change Scores
+anova_test(data = summed_df, dv = change_score, wid = ParticipantID, within = scenario_order)
+
+##Baseline Scores
+anova_test(data = summed_df, dv = baseline_score, wid = ParticipantID, within = scenario_order)
+
+```
+
+### Dog & Robot Factors
+
+##### Run correlations on participants who saw dog or robot agents. First prepare the data
+
+```{r}
+
+analysis_df2 <- analysis_df %>%
+  select(ParticipantID, Experience, Knowledge)
+
+
+factors <- merge(summed_df, analysis_df2)
+
+for_cors <- factors %>%
+  filter(Agent != "person") %>%
+  group_by(ParticipantID) %>%
+  summarise(Experience = Experience, 
+            Agent = Agent,
+            Knowledge = Knowledge,
+            baseline_score = mean(baseline_score), 
+            magnitude_change_score = mean(magnitude_change_score), 
+            change_score = mean(change_score), 
+            final_score = mean(final_score)) %>%
+  unique()
+```
+
+### Do knowledge and experience with dogs predict trust??
+
+##### Experience with dogs
+
+```{r}
+dog_cors <- for_cors %>% filter(Agent == "dog")
+
+
+table(dog_cors$Experience)
+
+
+cor.test(dog_cors$Experience, dog_cors$baseline_score, method = "spearman")
+
+
+cor.test(dog_cors$Experience, dog_cors$magnitude_change_score, method = "spearman")
+```
+
+##### Knowledge about dogs
+
+```{r}
+
+table(dog_cors$Knowledge)
+
+
+cor.test(dog_cors$Knowledge, dog_cors$baseline_score, method = "spearman")
+
+
+cor.test(dog_cors$Knowledge, dog_cors$magnitude_change_score, method = "spearman")
+```
+
+### Do knowledge and experience with robots predict trust??
+
+##### Experience with robots
+
+```{r}
+robot_cors <- for_cors %>% filter(Agent == "robot")
+
+
+table(robot_cors$Experience)
+
+
+cor.test(robot_cors$Experience, robot_cors$baseline_score, method = "spearman")
+
+
+cor.test(robot_cors$Experience, robot_cors$magnitude_change_score, method = "spearman")
+```
+
+##### Knowledge about robots
+
+```{r}
+
+table(robot_cors$Knowledge)
+
+
+cor.test(robot_cors$Knowledge, robot_cors$baseline_score, method = "spearman")
+
+
+cor.test(robot_cors$Knowledge, robot_cors$magnitude_change_score, method = "spearman")
+```

@@ -1,0 +1,543 @@
+---
+title: "Dog Trust Analysis"
+author: "Madeline H. Pelgrim"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+---
+
+```{r echo=FALSE, message=FALSE, warning = FALSE}
+library(tidyverse)
+library(lmerTest)
+library(rstatix)
+library(emmeans)
+library(plotrix)
+```
+
+# Import and Prepare Cleaned Data
+
+*Data from qualtrics cleaned using dog_trust_cleaning.R file*
+
+```{r}
+
+analysis_df <- read_csv("trust_exp1_data.csv")
+
+##Create dataframe with summed scores (not broken down by MDMT V1 Subscore)
+summed_df <- analysis_df %>%
+  ungroup() %>%
+  mutate(final_score = push_reliable_score + push_ethical_score + push_capable_score + push_sincere_score, 
+    baseline_score = reliable_score + ethical_score + capable_score + sincere_score) %>%
+  mutate(magnitude_change_score = abs(baseline_score - final_score), 
+         change_score = final_score - baseline_score,
+         social_scenario = ifelse(scenario_num == 3, 1,
+                                  ifelse(scenario_num == 4, 2, scenario_num))) %>%
+  select(scenario, final_score, baseline_score, ParticipantID, scenario_num, Push_Direction, magnitude_change_score, change_score, social_scenario, original_sample, scenario_order) %>%
+  distinct()
+```
+
+## Are MDMT scores different across our scenarios?
+
+#### Summed baseline trust scores as a function of the scenario
+
+```{r}
+
+##Baseline Scores
+anova_test(data = summed_df, dv = baseline_score, wid = ParticipantID, within = scenario_num)
+
+##Magnitude Change Scores
+anova_test(data = summed_df, dv = magnitude_change_score, wid = ParticipantID, within = scenario_num)
+```
+
+#### Effects of social vs. less-social scores (collapsing across our 4)
+
+```{r}
+
+##Prepare dataframe
+social_df <- summed_df %>%
+  ungroup() %>%
+  group_by(ParticipantID, social_scenario) %>%
+  summarise(final_score = mean(final_score), baseline_score = mean(baseline_score),
+            magnitude_change_score = mean(magnitude_change_score)) %>%
+  group_by(ParticipantID) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+##Gather summary statistics
+social_df %>%
+group_by(social_scenario) %>%
+summarise(
+mean_b = mean(baseline_score, na.rm = TRUE),
+sd_b = sd(baseline_score, na.rm = TRUE),
+mean_c = mean(magnitude_change_score, na.rm= TRUE),
+sd_c = sd(magnitude_change_score, na.rm = TRUE)
+)
+        
+
+##Are the baseline scores different between social and less social scenarios? 
+t.test(baseline_score ~ social_scenario, data = social_df, paired = TRUE)
+
+
+##Are the magnitude change scores different between social and less social scenarios? 
+t.test(magnitude_change_score ~ social_scenario, data = social_df, paired = TRUE)
+
+```
+
+# Primary Model - Change in Trust Summed
+
+```{r}
+##model without interaction
+model0 <- lmer(change_score ~ Push_Direction + scenario + (1|ParticipantID), contrasts = list(Push_Direction = "contr.sum", scenario = "contr.sum"), data = summed_df)
+
+##model with interaction
+model1 <- lmer(change_score ~ Push_Direction*scenario + (1|ParticipantID), contrasts = list(Push_Direction = "contr.sum", scenario = "contr.sum"), data = summed_df)
+
+anova(model0, model1) ##interaction does NOT improve fit so don't proceed with this model
+
+##summary of main effects
+Anova(model0, type = 3)
+
+summary(model0)
+
+#follow-up on scenario differences
+pairs(emmeans(model0, ~ scenario))
+```
+
+### How many of the change scores match the valence of the push direction?
+
+```{r}
+analysis_df %>%
+  group_by(scenario_num, ParticipantID) %>%
+  summarise(value = sum(value), Push_Direction = Push_Direction) %>%
+  filter(!is.na(value)) %>%
+  distinct() %>%
+  mutate(sign = if_else(value > 0, "positive", "negative")) %>%
+  group_by(Push_Direction, sign) %>%
+  summarise(count = n(), .groups = "drop")
+```
+
+### Visualization of change in trust scores
+
+```{r}
+summed_df %>%
+  mutate(scenario = replace(scenario, scenario == "C", "Capable"), 
+         scenario = replace(scenario, scenario == "E", "Ethical"),
+         scenario = replace(scenario, scenario == "R", "Reliable"),
+         scenario = replace(scenario, scenario == "S", "Sincere")) %>%
+  ggplot(aes(x = scenario, y = change_score, fill = Push_Direction)) + geom_bar(stat = "summary", fun.y = "mean", position = "dodge") + ylab("Average Change in Trust") + xlab("MDMT V1 Pushed Dimension") + theme_minimal()
+```
+
+# Secondary Model - Change in Trust by Subdimension
+
+```{r}
+##model without interaction
+model0.1 <- lmer(value ~ Push_Direction + pushed_dimension + measured_dimension + (1|ParticipantID), contrasts = list(Push_Direction = "contr.sum", pushed_dimension = "contr.sum", measured_dimension = "contr.sum"), data = analysis_df)
+
+##model with interaction
+model1.1 <- lmer(value ~ Push_Direction*pushed_dimension + measured_dimension + (1|ParticipantID), contrasts = list(Push_Direction = "contr.sum", pushed_dimension = "contr.sum", measured_dimension = "contr.sum"), data = analysis_df)
+
+anova(model0.1, model1.1) ##interaction does NOT improve fit so don't proceed
+
+##main effects
+Anova(model0.1, type = 3)
+
+summary(model0.1)
+
+#follow-up on scenario differences
+pairs(emmeans(model0.1, ~ measured_dimension))
+```
+
+# Comparison to Ullman & Malle, (2019)
+
+### Prepare the data
+
+```{r}
+##Read in data from Ullman & Malle (2019)
+robot_trust <- read_csv("ullman_malle_2019.csv") %>%
+  select(ParticipantID = ResponseId, 
+         reliable_score = MDMT_Rel, 
+         ethical_score = MDMT_Eth, 
+         capable_score = MDMT_Comp,
+         sincere_score = MDMT_Sinc) %>%
+  mutate(species = "robot")
+
+##Prepare for the data to be combined
+species_comparison <- analysis_df %>%
+  mutate(ParticipantID = as.character(ParticipantID)) %>%
+  group_by(ParticipantID) %>%
+  summarise(across(c(reliable_score, 
+                     ethical_score, 
+                     capable_score, 
+                     sincere_score), mean, na.rm = TRUE)) %>%
+  mutate(species = "dog") %>%
+  bind_rows(robot_trust) %>%
+  pivot_longer(cols = c(reliable_score, ethical_score, capable_score, sincere_score),
+               names_to = "dimension",
+               values_to = "value") %>%
+  mutate(dimension = as.factor(dimension), 
+         species = as.factor(species)) %>%
+  filter(!is.na(value))
+
+```
+
+### Gather summary statistics
+
+```{r}
+##MDMT score by agent type only (collapsed across dimensions)
+species_comparison %>%
+group_by(species) %>%
+  summarise(mean_score = mean(value, na.rm = TRUE), 
+            sd_score = sd(value, na.rm = TRUE))
+
+##MDMT score by dimension only (collapsed across agents)
+species_comparison %>%
+group_by(dimension) %>%
+  summarise(mean_score = mean(value, na.rm = TRUE), 
+            sd_score = sd(value, na.rm = TRUE))
+
+##MDMT score broken down by both agent and dimension
+species_comparison %>%
+group_by(species, dimension) %>%
+  summarise(mean_score = mean(value, na.rm = TRUE), 
+            sd_score = sd(value, na.rm = TRUE))
+
+```
+
+### Run the 2 (agent) by 4(dimension) ANOVA
+
+```{r}
+summary(aov(value ~ dimension + species, data = species_comparison))
+
+```
+
+### Visualize differences between trust in dogs and robots on MDMT V1
+
+```{r}
+species_comparison %>%
+  mutate(dimension = str_remove(as.character(dimension), "_score")) %>%
+  group_by(species, dimension) %>%
+  summarise(avg = mean(value), 
+            se = std.error(value)) %>%
+  ggplot(aes(x = dimension, y = avg, fill = species)) + 
+  geom_bar(stat = "identity", position = "dodge") + ylab("Average Baseline Trust with Standard Error") + xlab("MDMT V1 Measured Dimension") + theme_minimal() + ylim(0, 7) + geom_errorbar(aes(ymin=avg - se, ymax=avg+se), width=.2,
+                 position=position_dodge(.9)) + labs(fill = "Agent") + scale_fill_brewer(palette = "Paired")
+```
+
+# Participant Factors
+
+### Prepare the data
+
+```{r}
+
+analysis_df2 <- analysis_df %>%
+  select(ParticipantID, PAS_sum, Experience_Rate, Knowledgeable)
+
+
+dog_priors <- merge(summed_df, analysis_df2)
+
+baseline <- dog_priors %>%
+  group_by(ParticipantID) %>%
+  summarise(PAS = PAS_sum, Experience_Rate = Experience_Rate, 
+            Knowledgeable = Knowledgeable,
+            baseline_score = mean(baseline_score), 
+            magnitude_change_score = mean(magnitude_change_score), 
+            change_score = mean(change_score), 
+            final_score = mean(final_score)) %>%
+  unique()
+
+```
+
+### Impact of Pet Attitude Scale
+
+```{r}
+
+cor.test(baseline$PAS, baseline$baseline_score)
+
+cor.test(baseline$PAS, baseline$magnitude_change_score)
+
+```
+
+### Impact of experience with dogs
+
+```{r}
+
+##descriptives
+table(baseline$Experience_Rate)
+
+##Correlation - baseline
+cor.test(baseline$Experience_Rate, baseline$baseline_score, method = "spearman")
+
+##Correlation - magnitude change
+cor.test(baseline$Experience_Rate, baseline$magnitude_change_score, method = "spearman")
+
+```
+
+### Impact of knowledge about dogs
+
+```{r}
+
+##descriptives
+table(baseline$Knowledgeable)
+
+##Correlation - baseline
+cor.test(baseline$Knowledgeable, baseline$baseline_score, method = "spearman")
+
+##Correlation - magnitude change
+cor.test(baseline$Knowledgeable, baseline$magnitude_change_score, method = "spearman")
+
+```
+
+### Impact of Presentation Order
+
+```{r}
+
+##Change Scores
+anova_test(data = summed_df, dv = change_score, wid = ParticipantID, within = scenario_order)
+
+##Baseline Scores
+anova_test(data = summed_df, dv = baseline_score, wid = ParticipantID, within = scenario_order)
+
+```
+
+# Supplemental - complete analyses with only the original sample
+
+### Prepare the data
+
+```{r}
+##Create the smaller sample
+subset_df <- analysis_df %>%
+  filter(original_sample == "YES") 
+
+##Create the summed dataset with the smaller sample
+summed_subset_df <- subset_df %>%
+  ungroup() %>%
+  mutate(final_score = push_reliable_score + push_ethical_score + push_capable_score + push_sincere_score, 
+    baseline_score = reliable_score + ethical_score + capable_score + sincere_score) %>%
+  mutate(magnitude_change_score = abs(baseline_score - final_score), 
+         change_score = final_score - baseline_score,
+         social_scenario = ifelse(scenario_num == 3, 1,
+                                  ifelse(scenario_num == 4, 2, scenario_num))) %>%
+  select(scenario, final_score, baseline_score, ParticipantID, scenario_num, Push_Direction, magnitude_change_score, change_score, social_scenario, original_sample, scenario_order) %>%
+  filter(!is.na(scenario_num)) %>%
+  group_by(ParticipantID) %>%
+  filter(n() > 0) %>%
+  ungroup() %>%
+  distinct()
+```
+
+### Original Sample - are MDMT scores different across our scenarios?
+
+```{r}
+##Baseline Scores
+anova_test(data = summed_subset_df, dv = baseline_score, wid = ParticipantID, within = scenario_num)
+
+##Magnitude Change Scores
+anova_test(data = summed_subset_df, dv = magnitude_change_score, wid = ParticipantID, within = scenario_num)
+```
+
+### Original Sample - Effects of social vs. less-social scores
+
+```{r}
+##Prepare dataframe
+subset_social_df <- summed_subset_df %>%
+  ungroup() %>%
+  group_by(ParticipantID, social_scenario) %>%
+  summarise(final_score = mean(final_score), baseline_score = mean(baseline_score),
+            magnitude_change_score = mean(magnitude_change_score)) %>%
+  group_by(ParticipantID) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+##Gather summary statistics
+subset_social_df %>%
+  group_by(social_scenario) %>%
+  summarise(
+    mean_b = mean(baseline_score, na.rm = TRUE),
+    sd_b = sd(baseline_score, na.rm = TRUE),
+    mean_c = mean(magnitude_change_score, na.rm= TRUE),
+    sd_c = sd(magnitude_change_score, na.rm = TRUE))
+
+##Are the baseline scores different between social and less social scenarios?
+t.test(baseline_score ~ social_scenario, data = subset_social_df, paired = TRUE)
+
+##Are the magnitude change scores different between social and less social scenarios?
+t.test(magnitude_change_score ~ social_scenario, data = subset_social_df, paired = TRUE)
+```
+
+### Original Sample Primary Model - Change in Trust Summed
+
+```{r}
+##run identical model to main manuscript
+model0 <- lmer(change_score ~ Push_Direction + scenario + (1|ParticipantID), contrasts = list(Push_Direction = "contr.sum", scenario = "contr.sum"), data = summed_subset_df)
+
+Anova(model0, type = 3)
+
+summary(model0)
+
+#follow-up on scenario differences
+pairs(emmeans(model0, ~ scenario))
+```
+
+### Original Sample - how many change scores match the valence of the push direction?
+
+```{r}
+subset_df %>%
+  group_by(scenario_num, ParticipantID) %>%
+  summarise(value = sum(value), Push_Direction = Push_Direction) %>%
+  filter(!is.na(value)) %>%
+  distinct() %>%
+  mutate(sign = if_else(value > 0, "positive", "negative")) %>%
+  group_by(Push_Direction, sign) %>%
+  summarise(count = n(), .groups = "drop")
+```
+
+### Original Sample - descriptives for change in trust
+
+```{r}
+summed_subset_df %>%
+  group_by(Push_Direction) %>%
+  summarise(
+    mean_change = mean(change_score, na.rm = TRUE),
+    sd_change = sd(change_score, na.rm = TRUE))
+
+```
+
+### Original Sample - Comparisons to Ullman & Malle (2019)
+
+```{r}
+##Prepare for the data to be combined
+subset_species_comparison <- analysis_df %>%
+  filter(original_sample == "YES") %>%
+  mutate(ParticipantID = as.character(ParticipantID)) %>%
+  group_by(ParticipantID) %>%
+  summarise(across(c(reliable_score, 
+                     ethical_score, 
+                     capable_score, 
+                     sincere_score), mean, na.rm = TRUE)) %>%
+  mutate(species = "dog") %>%
+  bind_rows(robot_trust) %>%
+  pivot_longer(cols = c(reliable_score, ethical_score, capable_score, sincere_score),
+               names_to = "dimension",
+               values_to = "value") %>%
+  mutate(dimension = as.factor(dimension), 
+         species = as.factor(species)) %>%
+  filter(!is.na(value))
+
+##MDMT score by agent type only (collapsed across dimensions)
+subset_species_comparison %>%
+group_by(species) %>%
+  summarise(mean_score = mean(value, na.rm = TRUE), 
+            sd_score = sd(value, na.rm = TRUE))
+
+
+##MDMT score by dimension only (collapsed across agents)
+subset_species_comparison %>%
+group_by(dimension) %>%
+  summarise(mean_score = mean(value, na.rm = TRUE), 
+            sd_score = sd(value, na.rm = TRUE))
+
+##MDMT score broken down by both agent and dimension
+subset_species_comparison %>%
+group_by(species, dimension) %>%
+  summarise(mean_score = mean(value, na.rm = TRUE), 
+            sd_score = sd(value, na.rm = TRUE))
+
+```
+
+### **Original Sample - Run the 2 (agent) by 4(dimension) ANOVA**
+
+```{r}
+summary(aov(value ~ dimension + species, data = subset_species_comparison))
+
+```
+
+### Original Sample - Secondary Model
+
+```{r}
+
+model0.1 <- lmer(value ~ Push_Direction + pushed_dimension + measured_dimension + (1|ParticipantID), contrasts = list(Push_Direction = "contr.sum", pushed_dimension = "contr.sum", measured_dimension = "contr.sum"), data = subset_df)
+
+Anova(model0.1, type = 3)
+
+summary(model0.1)
+
+#follow-up on scenario differences
+pairs(emmeans(model0.1, ~ measured_dimension))
+
+pairs(emmeans(model0.1, ~ pushed_dimension))
+
+```
+
+### Original Sample Participant Factors
+
+#### Prepare the data
+
+```{r}
+
+analysis_df2 <- subset_df %>%
+  select(ParticipantID, PAS_sum, Experience_Rate, Knowledgeable)
+
+dog_priors <- merge(summed_subset_df, analysis_df2)
+
+baseline <- dog_priors %>%
+  group_by(ParticipantID) %>%
+  summarise(PAS = PAS_sum, Experience_Rate = Experience_Rate, 
+            Knowledgeable = Knowledgeable,
+            baseline_score = mean(baseline_score), 
+            magnitude_change_score = mean(magnitude_change_score), 
+            change_score = mean(change_score), 
+            final_score = mean(final_score)) %>%
+  unique() %>%
+  mutate(Experience_Rate = as.numeric(Experience_Rate), 
+         Knowledgeable = as.numeric(Knowledgeable))
+
+```
+
+#### Impact of Pet Attitude Scale
+
+```{r}
+cor.test(baseline$PAS, baseline$baseline_score)
+
+cor.test(baseline$PAS, baseline$magnitude_change_score)
+
+```
+
+#### Impact of experience with dogs
+
+```{r}
+##descriptives
+table(baseline$Experience_Rate)
+
+##Correlation - baseline
+cor.test(baseline$Experience_Rate, baseline$baseline_score, method = "spearman")
+
+##Correlation - magnitude change score
+cor.test(baseline$Experience_Rate, baseline$magnitude_change_score, method = "spearman")
+
+```
+
+#### Impact of knowledge about dogs
+
+```{r}
+
+##descriptives
+table(baseline$Knowledgeable)
+
+##Correlation - baseline
+cor.test(baseline$Knowledgeable, baseline$baseline_score, method = "spearman")
+
+##Correlation - magnitude change score
+cor.test(baseline$Knowledgeable, baseline$magnitude_change_score, method = "spearman")
+
+```
+
+### Impact of Presentation Order
+
+```{r}
+
+##Change Scores
+anova_test(data = summed_subset_df, dv = change_score, wid = ParticipantID, within = scenario_order)
+
+##Baseline Scores
+anova_test(data = summed_subset_df, dv = baseline_score, wid = ParticipantID, within = scenario_order)
+
+```
